@@ -1,0 +1,94 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/error-model.h"
+#include "ns3/flow-monitor-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE ("Case1Simulation");
+
+int main (int argc, char *argv[])
+{
+  // Đổi thành 'true' nếu bạn muốn mô phỏng Netflix (TCP)
+  // Để 'false' nếu muốn mô phỏng Zoom/Meet (UDP)
+  bool isTcp = false; 
+
+  CommandLine cmd;
+  cmd.AddValue("isTcp", "True for TCP, False for UDP", isTcp);
+  cmd.Parse(argc, argv);
+
+  // 1. Tạo 2 Node: 0 (Client) và 1 (Server)
+  NodeContainer nodes;
+  nodes.Create(2);
+
+  // 2. Thiết lập kênh truyền Point-to-Point (Băng thông 10Mbps, Độ trễ 2ms)
+  PointToPointHelper pointToPoint;
+  pointToPoint.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+  pointToPoint.SetChannelAttribute("Delay", StringValue("2ms"));
+
+  NetDeviceContainer devices;
+  devices = pointToPoint.Install(nodes);
+
+  // 3. Giả lập sự cố mạng: Tỷ lệ rớt gói 2% (Packet Loss = 0.02)
+  Ptr<RateErrorModel> em = CreateObject<RateErrorModel>();
+  em->SetAttribute("ErrorRate", DoubleValue(0.02));
+  devices.Get(1)->SetAttribute("ReceiveErrorModel", PointerValue(em));
+
+  // 4. Cài đặt giao thức mạng (IP)
+  InternetStackHelper stack;
+  stack.Install(nodes);
+
+  Ipv4AddressHelper address;
+  address.SetBase("10.1.1.0", "255.255.255.0");
+  Ipv4InterfaceContainer interfaces = address.Assign(devices);
+
+  uint16_t port = 5000;
+  ApplicationContainer serverApp, clientApp;
+
+  // 5. Thiết lập luồng dữ liệu theo kịch bản (TCP hoặc UDP)
+  if (isTcp) {
+      // Kịch bản TCP (Netflix) - Ưu tiên truyền lại dữ liệu
+      Address sinkAddress(InetSocketAddress(Ipv4Address::GetAny(), port));
+      PacketSinkHelper packetSinkHelper("ns3::TcpSocketFactory", sinkAddress);
+      serverApp = packetSinkHelper.Install(nodes.Get(1));
+
+      Address serverAddress(InetSocketAddress(interfaces.GetAddress(1), port));
+      BulkSendHelper bulkSend("ns3::TcpSocketFactory", serverAddress);
+      bulkSend.SetAttribute("MaxBytes", UintegerValue(0)); // Gửi liên tục
+      clientApp = bulkSend.Install(nodes.Get(0));
+  } else {
+      // Kịch bản UDP (Video Conference) - Ưu tiên thời gian thực
+      Address sinkAddress(InetSocketAddress(Ipv4Address::GetAny(), port));
+      PacketSinkHelper packetSinkHelper("ns3::UdpSocketFactory", sinkAddress);
+      serverApp = packetSinkHelper.Install(nodes.Get(1));
+
+      Address serverAddress(InetSocketAddress(interfaces.GetAddress(1), port));
+      OnOffHelper onOff("ns3::UdpSocketFactory", serverAddress);
+      onOff.SetAttribute("DataRate", StringValue("5Mbps")); // Giả định luồng video 5Mbps
+      onOff.SetAttribute("PacketSize", UintegerValue(1024));
+      clientApp = onOff.Install(nodes.Get(0));
+  }
+
+  // Chạy ứng dụng trong 10 giây
+  serverApp.Start(Seconds(1.0));
+  serverApp.Stop(Seconds(10.0));
+  clientApp.Start(Seconds(2.0));
+  clientApp.Stop(Seconds(10.0));
+
+  // 6. Gắn FlowMonitor để thu thập dữ liệu (Jitter, Throughput, Packet Loss)
+  FlowMonitorHelper flowmon;
+  Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+
+  // 7. Bắt đầu mô phỏng
+  Simulator::Stop(Seconds(11.0));
+  Simulator::Run();
+
+  // Xuất kết quả ra file XML để NetSimSolutions phân tích và vẽ biểu đồ
+  monitor->SerializeToXmlFile("flowmon-results.xml", true, true);
+
+  Simulator::Destroy();
+  return 0;
+}
